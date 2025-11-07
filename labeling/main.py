@@ -44,9 +44,9 @@ def get_next_api_key():
     current_key_index = (current_key_index + 1) % len(GEMINI_API_KEYS)
     return key
 
-HF_REPO_SEGMENT = "TakalaWang/anime-2024-segment-queries"
-HF_REPO_EPISODE = "TakalaWang/anime-2024-episode-queries"
-HF_REPO_SERIES = "TakalaWang/anime-2024-series-queries"
+HF_REPO_SEGMENT = "TakalaWang/anime-2024-winter-segment-queries"
+HF_REPO_EPISODE = "TakalaWang/anime-2024-winter-episode-queries"
+HF_REPO_SERIES = "TakalaWang/anime-2024-winter-series-queries"
 
 CACHE_DIR = Path("./cache_gemini_video")
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
