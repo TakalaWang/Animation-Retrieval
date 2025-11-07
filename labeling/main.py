@@ -11,7 +11,7 @@ from datasets import load_dataset, Dataset
 from huggingface_hub import HfApi, create_repo
 
 import google.genai as genai
-from moviepy.editor import VideoFileClip, concatenate_videoclips
+from moviepy import VideoFileClip, concatenate_videoclips
 
 
 from segment_processor import generate_segment_queries
