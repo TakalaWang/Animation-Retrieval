@@ -11,6 +11,7 @@ Segment Level 處理模組：處理動畫片段的查詢生成
 """
 
 import json
+import time
 from typing import Any, Dict
 
 import google.genai as genai
@@ -113,6 +114,15 @@ def generate_segment_queries(
         包含查詢語句的字典
     """
     file = client.files.upload(file=video_path)
+
+    # 等待文件處理完成
+    while file.state.name == "PROCESSING":
+        time.sleep(2)  # 每2秒檢查一次
+        file = client.files.get(name=file.name)
+
+    if file.state.name == "FAILED":
+        raise ValueError(f"文件處理失敗: {file.state.name}")
+
     resp = client.models.generate_content(
         model=model_name,
         contents=types.Content(
