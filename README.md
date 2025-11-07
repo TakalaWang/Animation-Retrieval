@@ -1,6 +1,6 @@
 # Anime Video Retrieval Dataset Creation
 
-This script processes the JacobLinCool/anime-2024 spring subset to create a query dataset.
+This script processes the JacobLinCool/anime-2024 winter subset to create a query dataset.
 
 ## Setup
 
@@ -10,11 +10,11 @@ This script processes the JacobLinCool/anime-2024 spring subset to create a quer
 
 ## What it does
 
-- Downloads anime videos from the spring subset
+- Downloads anime videos from the winter subset
 - **Fixed 1-minute segmentation**: Cuts each video into exactly 60-second segments
 - Uses Gemini to generate descriptions for each segment (based on extracted frames)
 - Generates 10 possible search queries per segment
-- Uploads everything to TakalaWang/Anime-2024-spring-query dataset
+- Uploads everything to TakalaWang/Anime-2024-winter-query dataset
 
 ## Technical Details
 

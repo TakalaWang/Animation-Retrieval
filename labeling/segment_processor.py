@@ -123,7 +123,6 @@ def process_segments(
 ) -> List[Dict[str, Any]]:
     """處理整集影片的所有片段"""
     results: List[Dict[str, Any]] = []
-    start = 0.0
     seg_idx = 0
     
 
