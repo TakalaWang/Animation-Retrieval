@@ -20,4 +20,5 @@ dependencies = [
     "tqdm>=4.67.1",
     "tinytag>=1.6.0",
     "moviepy>=2.2.1",
+    "torch>=2.9.0",
 ]

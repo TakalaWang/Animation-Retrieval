@@ -2,6 +2,7 @@ import os
 import json
 import time
 import logging
+import shutil
 import re
 from pathlib import Path
 from typing import Any, Dict, List
@@ -15,8 +16,7 @@ import google.genai as genai
 from moviepy import VideoFileClip, concatenate_videoclips
 
 
-
-# 你自己的模組
+from segment_processor import generate_segment_queries
 from episode_processor import process_episode
 from series_processor import process_series
 
@@ -298,7 +298,7 @@ def main():
             
             # 生成查詢
             print(f"  🎬 生成查詢: 片段 {seg_idx}")
-            from segment_processor import generate_segment_queries
+            
             
             data = call_with_retry(
                 generate_segment_queries,
@@ -383,7 +383,6 @@ def main():
     if not series_video_path.exists():
         if len(episode_video_paths) == 1:
             # 只有一集，直接複製
-            import shutil
             shutil.copy2(episode_video_paths[0], series_video_path)
             print(f"  📋 已複製影片作為整季: {series_video_path.name}")
         else:
