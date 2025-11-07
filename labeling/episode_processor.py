@@ -1,7 +1,16 @@
-"""Episode Level 處理模組：處理單集動畫的查詢生成"""
+"""
+Episode Level 處理模組：處理單集動畫的查詢生成
+
+此模組負責使用 Gemini API 為單集動畫生成自然語言查詢語句，
+模擬觀眾憑記憶搜尋這一集時會說出的話。
+
+主要功能：
+- 定義集數級別的查詢生成 schema
+- 提供生成查詢的提示詞
+- 呼叫 Gemini API 進行內容分析
+"""
 
 import json
-from pathlib import Path
 from typing import Any, Dict
 
 import google.genai as genai
@@ -58,6 +67,7 @@ EPISODE_SCHEMA: Dict[str, Any] = {
     ]
 }
 
+# 提示詞：指導 Gemini 生成自然語言查詢
 PROMPT = """你將獲得一集影片的資訊，請你根據整集的內容，
 模擬「觀眾憑記憶搜尋這一集」時會說出的自然中文查詢句。
 
@@ -90,7 +100,17 @@ def generate_episode_queries(
     file_uri: str,
     model_name: str = "models/gemini-2.5-flash",
 ) -> Dict[str, Any]:
-    """使用 Gemini 生成單集級別的查詢語句"""
+    """
+    使用 Gemini 生成單集級別的查詢語句
+
+    Args:
+        client: Gemini API 客戶端
+        file_uri: 上傳到 Gemini 的檔案 URI
+        model_name: 使用的模型名稱
+
+    Returns:
+        包含查詢語句的字典
+    """
     resp = client.models.generate_content(
         model=model_name,
         contents=types.Content(
@@ -108,50 +128,3 @@ def generate_episode_queries(
         }
     )
     return json.loads(resp.text)
-
-
-# ================== 處理邏輯 ==================
-
-def process_episode(
-    client: genai.Client,
-    episode_id: str,
-    file_uri: str,
-    cache_dir: Path,
-    retry_fn=None,
-) -> Dict[str, Any]:
-    """處理單集動畫的查詢生成"""
-    cache_path = cache_dir / f"episode_{episode_id}.json"
-    
-    # 檢查快取
-    if cache_path.exists():
-        with open(cache_path, "r", encoding="utf-8") as f:
-            cached = json.load(f)
-            print("  📦 使用快取")
-            return cached
-    
-    print("  📺 生成查詢...")
-    
-    # 呼叫 Gemini API
-    if retry_fn:
-        data = retry_fn(
-            generate_episode_queries,
-            client=client,
-            file_uri=file_uri,
-            sleep_sec=5,
-        )
-    else:
-        data = generate_episode_queries(
-            client=client,
-            file_uri=file_uri,
-        )
-    
-    record = {
-        "episode_id": episode_id,
-        "queries": data,
-    }
-    
-    # 儲存快取
-    with open(cache_path, "w", encoding="utf-8") as f:
-        json.dump(record, f, ensure_ascii=False, indent=2)
-    
-    return record

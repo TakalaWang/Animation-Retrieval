@@ -1,8 +1,17 @@
-"""Series Level 處理模組：處理整季/整部動畫的查詢生成"""
+"""
+Series Level 處理模組：處理整季/整部動畫的查詢生成
+
+此模組負責使用 Gemini API 為整季動畫生成自然語言查詢語句，
+模擬觀眾回憶整部作品時會提出的查詢。
+
+主要功能：
+- 定義系列級別的查詢生成 schema
+- 提供生成查詢的提示詞
+- 呼叫 Gemini API 進行內容分析
+"""
 
 import json
-from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict
 
 import google.genai as genai
 from google.genai import types
@@ -58,6 +67,7 @@ SERIES_SCHEMA: Dict[str, Any] = {
     ]
 }
 
+# 提示詞：指導 Gemini 生成自然語言查詢
 PROMPT = """你將獲得一部完整作品的資訊（包含劇情與角色資料），
 請你模擬「觀眾回憶整部作品」時會提出的自然中文查詢句。
 
@@ -95,8 +105,17 @@ def generate_series_queries(
     series_text: str,
     model_name: str = "models/gemini-2.5-flash",
 ) -> Dict[str, Any]:
-    """使用 Gemini 生成整季/整部級別的查詢語句"""
+    """
+    使用 Gemini 生成整季/整部級別的查詢語句
 
+    Args:
+        client: Gemini API 客戶端
+        series_text: 系列描述文字
+        model_name: 使用的模型名稱
+
+    Returns:
+        包含查詢語句的字典
+    """
     resp = client.models.generate_content(
         model=model_name,
         contents=types.Content(
@@ -112,59 +131,3 @@ def generate_series_queries(
     )
     return json.loads(resp.text)
 
-
-# ================== 處理邏輯 ==================
-
-def process_series(
-    client: genai.Client,
-    series_id: str,
-    episodes: List[Tuple[str, str, float]],
-    cache_dir: Path,
-    retry_fn=None,
-) -> Dict[str, Any]:
-    """處理整季/整部動畫的查詢生成"""
-    cache_path = cache_dir / f"series_{series_id}.json"
-    
-    # 檢查快取
-    if cache_path.exists():
-        with open(cache_path, "r", encoding="utf-8") as f:
-            cached = json.load(f)
-            print("  📦 使用快取")
-            return cached
-    
-    print("  🎭 生成查詢...")
-    
-    # 建立系列摘要
-    lines = [f"這是一部名為 {series_id} 的動畫，包含以下集數："]
-    for ep_id, file_uri, dur in episodes:
-        lines.append(f"- 集數 {ep_id} ，影片來源 {file_uri} ，長度約 {int(dur)} 秒。")
-    series_text = "\n".join(lines)
-    
-    # 呼叫 Gemini API
-    if retry_fn:
-        data = retry_fn(
-            generate_series_queries,
-            client=client,
-            series_text=series_text,
-            sleep_sec=5,
-        )
-    else:
-        data = generate_series_queries(
-            client=client,
-            series_text=series_text,
-        )
-    
-    record = {
-        "series_id": series_id,
-        "queries": data,
-        "episodes": [
-            {"episode_id": ep_id, "file_uri": file_uri, "duration_s": dur}
-            for (ep_id, file_uri, dur) in episodes
-        ],
-    }
-    
-    # 儲存快取
-    with open(cache_path, "w", encoding="utf-8") as f:
-        json.dump(record, f, ensure_ascii=False, indent=2)
-    
-    return record

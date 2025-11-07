@@ -1,8 +1,17 @@
-"""Segment Level 處理模組：處理動畫片段的查詢生成"""
+"""
+Segment Level 處理模組：處理動畫片段的查詢生成
+
+此模組負責使用 Gemini API 為動畫片段生成自然語言查詢語句，
+模擬人類憑記憶想搜尋影片片段時會說出的話。
+
+主要功能：
+- 定義片段級別的查詢生成 schema
+- 提供生成查詢的提示詞
+- 呼叫 Gemini API 進行內容分析
+"""
 
 import json
-from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 import google.genai as genai
 from google.genai import types
@@ -58,6 +67,7 @@ SEGMENT_SCHEMA: Dict[str, Any] = {
     ]
 }
 
+# 提示詞：指導 Gemini 生成自然語言查詢
 PROMPT = """你將獲得一段影片的資訊，請你根據該片段的內容，
 模擬「人類憑記憶想搜尋影片片段」時會說出的自然中文查詢句。
 
@@ -88,16 +98,27 @@ PROMPT = """你將獲得一段影片的資訊，請你根據該片段的內容�
 
 def generate_segment_queries(
     client: genai.Client,
-    file_uri: str,
+    video_path: str,
     model_name: str = "models/gemini-2.5-flash",
 ) -> Dict[str, Any]:
-    """使用 Gemini 生成片段級別的查詢語句"""
+    """
+    使用 Gemini 生成片段級別的查詢語句
+
+    Args:
+        client: Gemini API 客戶端
+        video_path: 本地影片檔案路徑
+        model_name: 使用的模型名稱
+
+    Returns:
+        包含查詢語句的字典
+    """
+    file = client.files.upload(file=video_path)
     resp = client.models.generate_content(
         model=model_name,
         contents=types.Content(
             parts=[
                 types.Part(
-                    file_data=types.FileData(file_uri=file_uri),
+                    file_data=types.FileData(file_uri=file.uri),
                     video_metadata=types.VideoMetadata(fps=5)
                 ),
                 types.Part(text=PROMPT),
@@ -110,56 +131,3 @@ def generate_segment_queries(
     )
     return json.loads(resp.text)
 
-
-# ================== 處理邏輯 ==================
-
-def process_segments(
-    client: genai.Client,
-    episode_id: str,
-    file_uri: str,
-    cache_dir: Path,
-    
-    retry_fn=None,
-) -> List[Dict[str, Any]]:
-    """處理整集影片的所有片段"""
-    results: List[Dict[str, Any]] = []
-    seg_idx = 0
-    
-
-    cache_path = cache_dir / f"segment_{episode_id}_seg{seg_idx}.json"
-    
-    # 檢查快取
-    if cache_path.exists():
-        with open(cache_path, "r", encoding="utf-8") as f:
-            cached = json.load(f)
-            results.append(cached)
-    else:
-        
-        # 呼叫 Gemini API
-        if retry_fn:
-            data = retry_fn(
-                generate_segment_queries,
-                client=client,
-                file_uri=file_uri,
-                sleep_sec=5,
-            )
-        else:
-            data = generate_segment_queries(
-                client=client,
-                file_uri=file_uri,
-            )
-        
-        record = {
-            "episode_id": episode_id,
-            "segment_index": seg_idx,
-            "queries": data,
-        }
-        
-        # 儲存快取
-        with open(cache_path, "w", encoding="utf-8") as f:
-            json.dump(record, f, ensure_ascii=False, indent=2)
-        
-        results.append(record)
-
-    
-    return results
