@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Tuple
 
 from tqdm import tqdm
 from dotenv import load_dotenv
-from datasets import load_dataset, Dataset
+from datasets import load_dataset, Dataset, Video
 from huggingface_hub import HfApi, create_repo
 
 import google.genai as genai
@@ -165,7 +165,7 @@ def extract_video_segment(
     video_path: str, start_s: float, end_s: float, output_path: Path
 ):
     with VideoFileClip(video_path) as video:
-        segment = video.subclip(start_s, end_s)
+        segment = video.subclipped(start_s, end_s)
         segment.write_videofile(
             str(output_path),
             codec="libx264",
@@ -243,6 +243,7 @@ def call_with_retry(fn, *args, **kwargs):
 def load_and_group_dataset() -> Dict[str, List[Dict[str, Any]]]:
     print("載入資料集...")
     ds = load_dataset(TEST_DATASET, TEST_SPLIT, split="train")
+    ds = ds.cast_column("video", Video(decode=False))
 
     series_groups: Dict[str, List[Dict[str, Any]]] = {}
     for row in tqdm(ds, desc="group by series"):
