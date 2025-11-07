@@ -250,7 +250,6 @@ def load_and_group_dataset() -> Dict[str, List[Dict[str, Any]]]:
         series_name = row["series_name"]
         episode_name = row["episode_name"]
         video_path = row["video"]["path"]
-        duration = row.get("duration")
         release_date = row.get("release_date")
 
         series_groups.setdefault(series_name, []).append(
@@ -258,7 +257,6 @@ def load_and_group_dataset() -> Dict[str, List[Dict[str, Any]]]:
                 "episode_name": episode_name,
                 "series_name": series_name,
                 "video_path": video_path,
-                "duration": duration,
                 "release_date": release_date,
             }
         )
@@ -267,7 +265,11 @@ def load_and_group_dataset() -> Dict[str, List[Dict[str, Any]]]:
 
 
 def process_segments_for_episode(
-    episode_id: str, video_path: str, duration_s: float
+    series_name: str,
+    episode_id: str,
+    video_path: str,
+    duration_s: float,
+    release_date: Any,
 ) -> List[Dict[str, Any]]:
     """處理單集的片段級別查詢生成"""
     segment_ranges = []
@@ -296,7 +298,6 @@ def process_segments_for_episode(
             }
         )
 
-    # 處理每個片段
     seg_results = []
     for seg_info in segment_files:
         seg_idx = seg_info["index"]
@@ -304,13 +305,18 @@ def process_segments_for_episode(
 
         cache_path = CACHE_DIR / f"segment_{episode_id}_seg{seg_idx}.json"
         if cache_path.exists():
+            # 就算有 cache，也幫它補上 series_name / release_date，避免舊檔是空的
             with open(cache_path, "r", encoding="utf-8") as f:
                 cached = json.load(f)
-                seg_results.append(cached)
-                continue
+            cached["series_name"] = series_name
+            cached["release_date"] = release_date
+            seg_results.append(cached)
+            # 回寫一次，讓檔案也變成新的
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump(cached, f, ensure_ascii=False, indent=2)
+            continue
 
         client = get_client()
-
         data = call_with_retry(
             generate_segment_queries,
             client=client,
@@ -318,10 +324,10 @@ def process_segments_for_episode(
         )
 
         record = {
-            "series_name": "",    # 後面補
+            "series_name": series_name,
             "episode_id": episode_id,
             "segment_index": seg_idx,
-            "release_date": None, # 後面補
+            "release_date": release_date,
             "file_name": f"videos/segment_{episode_id}_seg{seg_idx}.mp4",
             "queries": data,
         }
@@ -391,10 +397,10 @@ def process_episode_level(
 
 def process_single_episode(
     series_name: str, episode_info: Dict[str, Any]
-) -> Tuple[str, str, float, Any, Dict[str, Any]]:
-    """處理單個集數的所有層級，返回 (episode_id, video_path, duration, release_date, episode_record)"""
+) -> Tuple[str, str, float, Any, Dict[str, Any], List[Dict[str, Any]]]:
     episode_id = episode_info["episode_name"]
     video_path = episode_info["video_path"]
+    release_date = episode_info.get("release_date")
 
     duration_s = get_video_duration_from_path(video_path)
 
@@ -404,14 +410,14 @@ def process_single_episode(
     print(f"{'='*60}\n")
 
     # ===== Segment level =====
-    seg_results = process_segments_for_episode(episode_id, video_path, duration_s)
+    seg_results = process_segments_for_episode(
+        series_name,
+        episode_id,
+        video_path,
+        duration_s,
+        release_date,
+    )
 
-    # 填充 series_name 和 release_date
-    for seg in seg_results:
-        seg["series_name"] = series_name
-        seg["release_date"] = episode_info.get("release_date")
-
-    # 上傳 segment JSON 彙總
     seg_local = CACHE_DIR / f"segment_{episode_id}.json"
     with open(seg_local, "w", encoding="utf-8") as f:
         json.dump(seg_results, f, ensure_ascii=False, indent=2)
@@ -423,17 +429,18 @@ def process_single_episode(
         episode_id,
         video_path,
         duration_s,
-        episode_info.get("release_date"),
+        release_date,
     )
 
     return (
         episode_id,
         video_path,
         duration_s,
-        episode_info.get("release_date"),
+        release_date,
         episode_record,
         seg_results,
     )
+
 
 
 def process_series_level(
