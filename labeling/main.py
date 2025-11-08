@@ -209,6 +209,30 @@ def get_video_duration_from_path(path: str) -> float:
 
 
 # ================== API 工具函數 ==================
+def upload_video_to_gemini(client: genai.Client, video_path: str) -> str:
+    """
+    上傳影片到 Gemini API 並等待處理完成
+    
+    Args:
+        client: Gemini API 客戶端
+        video_path: 影片檔案路徑
+        
+    Returns:
+        file_uri: Gemini 處理完成的檔案 URI
+    """
+    uploaded = client.files.upload(file=video_path)
+    file_uri = uploaded.uri
+
+    while uploaded.state.name == "PROCESSING":
+        time.sleep(1)
+        uploaded = client.files.get(name=uploaded.name)
+
+    if uploaded.state.name == "FAILED":
+        raise ValueError(f"影片處理失敗: {uploaded.state.name}")
+    
+    return file_uri
+
+
 def call_with_retry(fn, *args, **kwargs):
     """執行 API 呼叫，失敗時自動更換 Gemini Key 並重試"""
     for attempt in range(MAX_RETRIES):
@@ -317,10 +341,12 @@ def process_segments_for_episode(
             continue
 
         client = get_client()
+        file_uri = call_with_retry(upload_video_to_gemini, client=client, video_path=str(segment_path))
+        
         data = call_with_retry(
             generate_segment_queries,
             client=client,
-            video_path=str(segment_path),
+            file_uri=file_uri,
         )
 
         record = {
@@ -355,15 +381,7 @@ def process_episode_level(
 ) -> Dict[str, Any]:
     """處理集數級別的查詢生成"""
     client = get_client()
-
-    uploaded = client.files.upload(file=video_path)
-    file_uri = uploaded.uri
-    while uploaded.state.name == "PROCESSING":
-        time.sleep(1)
-        uploaded = client.files.get(name=uploaded.name)
-
-    if uploaded.state.name == "FAILED":
-        raise ValueError(f"文件處理失敗: {uploaded.state.name}")
+    file_uri = call_with_retry(upload_video_to_gemini, client=client, video_path=str(video_path))
 
     epi_result = call_with_retry(
         generate_episode_queries,
@@ -447,22 +465,7 @@ def process_series_level(
     series_name: str, processed_episodes: List[Tuple[str, str, float, Any]]
 ) -> Dict[str, Any]:
     """處理系列級別的查詢生成"""
-    client = get_client()
-
-    # 為 series 構建簡單的文字描述（目前可根據需要擴充）
-    series_text_lines = [f"Series: {series_name}"]
-    for ep_id, vp, dur, rd in processed_episodes:
-        series_text_lines.append(
-            f"Episode: {ep_id} | duration: {dur:.2f} s | path: {vp} | release_date: {rd}"
-        )
-    series_text = "\n".join(series_text_lines)
-
-    series_result = call_with_retry(
-        generate_series_queries,
-        client=client,
-        series_text=series_text,
-    )
-
+    
     # 合併並上傳整季影片
     print("  準備整季影片...")
     episode_video_paths = [vp for _, vp, _, _ in processed_episodes]
@@ -470,6 +473,17 @@ def process_series_level(
     if not series_video_path.exists():
         print("  🔗 開始合併整季影片...")
         concatenate_videos(episode_video_paths, series_video_path)
+
+    # 上傳整季影片到 Gemini API 進行分析
+    print("  🤖 使用 Gemini 分析整季內容...")
+    client = get_client()
+    file_uri = call_with_retry(upload_video_to_gemini, client=client, video_path=str(series_video_path))
+    
+    series_result = call_with_retry(
+        generate_series_queries,
+        client=client,
+        file_uri=file_uri,
+    )
 
     print("  📤 上傳整季影片到 HuggingFace...")
     upload_video_to_hf(
