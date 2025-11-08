@@ -568,6 +568,7 @@ def main():
 
     # 載入並分組資料集
     series_groups = load_and_group_dataset()
+    series_groups = {k: series_groups[k] for k in list(series_groups)[:5]}
 
     # 處理所有系列與 episodes
     (
