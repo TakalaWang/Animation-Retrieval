@@ -4,6 +4,7 @@ import time
 import logging
 import shutil
 import tempfile
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -13,7 +14,7 @@ from datasets import load_dataset, Dataset, Video
 from huggingface_hub import HfApi, create_repo
 
 import google.genai as genai
-from moviepy import VideoFileClip, concatenate_videoclips
+from moviepy import VideoFileClip
 
 
 from segment_processor import generate_segment_queries, BlockedContentError
@@ -180,26 +181,24 @@ def extract_video_segment(
 
 def concatenate_videos(video_paths: List[str], output_path: Path):
     """合併多個影片"""
-    clips = []
-    for path in video_paths:
-        clips.append(VideoFileClip(path))
+    output_path = Path(output_path)
+    tmp_list = output_path.with_suffix(".txt")
 
-    final_clip = concatenate_videoclips(clips, method="compose")
-    final_clip.write_videofile(
+    with open(tmp_list, "w", encoding="utf-8") as f:
+        for p in video_paths:
+            f.write(f"file '{Path(p).absolute()}'\n")
+
+    cmd = [
+        "ffmpeg",
+        "-f", "concat",
+        "-safe", "0",
+        "-i", str(tmp_list),
+        "-c", "copy",
         str(output_path),
-        codec="libx264",
-        audio_codec="aac",
-        temp_audiofile=str(output_path.parent / f"temp_{output_path.stem}_audio.m4a"),
-        remove_temp=True,
-        logger=None,
-    )
+    ]
+    subprocess.run(cmd, check=True)
 
-    # 關閉所有 clips
-    for clip in clips:
-        clip.close()
-    final_clip.close()
-
-    print(f"🔗 已合併影片: {output_path.name}")
+    tmp_list.unlink(missing_ok=True)
 
 
 def get_video_duration_from_path(path: str) -> float:
@@ -233,7 +232,6 @@ def upload_video_to_gemini(client: genai.Client, video_path: str) -> str:
         filename.encode('ascii')
     except UnicodeEncodeError:
         # 檔名包含中文或其他非 ASCII 字符，需要創建臨時副本
-        print(f"    ⚠️  檔名包含非 ASCII 字符，創建臨時副本...")
         
         # 使用檔案的後綴名和一個安全的 ASCII 名稱
         safe_name = f"temp_upload_{int(time.time() * 1000)}{original_path.suffix}"
@@ -242,15 +240,16 @@ def upload_video_to_gemini(client: genai.Client, video_path: str) -> str:
         # 複製檔案到臨時位置
         shutil.copy2(video_path, temp_file)
         upload_path = str(temp_file)
-        print(f"    ✅ 已創建臨時檔案: {safe_name}")
     
     try:
         # 每次都重新上傳，避免文件過期問題
-        uploaded = client.files.upload(file=upload_path)
+        def do_upload():
+            return client.files.upload(file=upload_path)
+        uploaded = call_with_retry(do_upload)
         file_uri = uploaded.uri
         
         while uploaded.state.name == "PROCESSING":
-            time.sleep(1)
+            time.sleep(5)
             uploaded = client.files.get(name=uploaded.name)
 
         if uploaded.state.name == "FAILED":
@@ -271,54 +270,18 @@ def upload_video_to_gemini(client: genai.Client, video_path: str) -> str:
 
 def call_with_retry(fn, *args, **kwargs):
     """執行 API 呼叫，失敗時自動更換 Gemini Key 並重試"""
-    for attempt in range(MAX_RETRIES):
+    for _ in range(MAX_RETRIES):
         try:
             # 如果 fn 是一個無參數的閉包函數，直接調用
             if callable(fn) and not args and not kwargs:
                 return fn()
             else:
                 return fn(*args, **kwargs)
-
-        except BlockedContentError:
-            # 內容被阻止，不重試，直接拋出
-            raise
             
         except Exception as e:
-            msg = str(e).lower()
-            is_rate_limited = (
-                "429" in msg or
-                "quota" in msg or
-                "rate" in msg or
-                "exceeded" in msg
-            )
-            
-            is_empty_response = (
-                "返回空響應" in str(e) or
-                "nonetype" in msg
-            )
-            
-            is_permission_denied = (
-                "permission_denied" in msg or
-                "403" in msg or
-                "do not have permission" in msg
-            )
-
-            if is_rate_limited:
-                print(f"⚠️  [retry {attempt+1}/{MAX_RETRIES}] Rate limited -> 換下一個 API Key")
-                time.sleep(RETRY_SLEEP)
-                continue
-            
-            if is_empty_response:
-                print(f"⚠️  [retry {attempt+1}/{MAX_RETRIES}] 空響應 -> 重試")
-                time.sleep(RETRY_SLEEP)
-                continue
-            
-            if is_permission_denied:
-                print(f"⚠️  [retry {attempt+1}/{MAX_RETRIES}] 文件權限錯誤 (可能過期) -> 重新上傳並重試")
-                time.sleep(RETRY_SLEEP)
-                continue
-
             print(f"❌ [error] {type(e).__name__}: {e}")
+            time.sleep(RETRY_SLEEP)
+            continue
 
     raise RuntimeError(f"重試次數已達上限 ({MAX_RETRIES})，仍未成功。")
 
@@ -495,8 +458,26 @@ def process_single_episode(
     episode_id = episode_info["episode_id"]
     video_path = episode_info["video_path"]
     release_date = episode_info.get("release_date")
-
     duration_s = get_video_duration_from_path(video_path)
+
+    safe_series = series_name.replace(" ", "_").replace("/", "_")
+    epi_local = CACHE_DIR / f"episode_{safe_series}_{episode_id}.json"
+    seg_local = CACHE_DIR / f"segment_{safe_series}_{episode_id}.json"
+
+    if epi_local.exists() and seg_local.exists():
+        with open(epi_local, "r", encoding="utf-8") as f:
+            episode_record = json.load(f)
+        with open(seg_local, "r", encoding="utf-8") as f:
+            seg_results = json.load(f)
+        
+        return (
+            episode_id,
+            video_path,
+            duration_s,
+            release_date,
+            episode_record,
+            seg_results,
+        )
 
     print(f"\n{'='*60}")
     print(f"處理集數: {episode_id}")
@@ -542,6 +523,14 @@ def process_series_level(
     series_name: str, processed_episodes: List[Tuple[str, str, float, Any]]
 ) -> Dict[str, Any]:
     """處理系列級別的查詢生成"""
+
+    safe_series = series_name.replace(" ", "_").replace("/", "_")
+    series_local = CACHE_DIR / f"series_{safe_series}.json"
+    if series_local.exists():
+        print(f"✅ series {series_name} 已有快取，略過重新生成")
+        with open(series_local, "r", encoding="utf-8") as f:
+            series_record = json.load(f)
+        return series_record
     
     # 合併並上傳整季影片
     print("  準備整季影片...")
@@ -580,7 +569,6 @@ def process_series_level(
         "query": series_result,  # 改名為 query
     }
 
-    series_local = CACHE_DIR / f"series_{safe_series}.json"
     with open(series_local, "w", encoding="utf-8") as f:
         json.dump(series_record, f, ensure_ascii=False, indent=2)
     update_series_metadata(HF_TOKEN)
