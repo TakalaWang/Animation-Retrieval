@@ -123,7 +123,7 @@ PROMPT = """你會拿到一段「關於某一季動畫的完整影片」，這�
 def generate_series_queries(
     client: genai.Client,
     file_uri: str,
-    model_name: str = "models/gemini-2.5-flash",
+    model_name: str = "models/gemini-2.5-pro",
 ) -> Dict[str, Any]:
     """
     使用 Gemini 生成整季/整部級別的查詢語句
@@ -142,7 +142,7 @@ def generate_series_queries(
             parts=[
                 types.Part(
                     file_data=types.FileData(file_uri=file_uri),
-                    video_metadata=types.VideoMetadata(fps=1)
+                    video_metadata=types.VideoMetadata(fps=0.5)
                 ),
                 types.Part(text=PROMPT),
             ]

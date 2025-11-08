@@ -179,26 +179,24 @@ def extract_video_segment(
         )
 
 
-def concatenate_videos(video_paths: List[str], output_path: Path):
-    """合併多個影片"""
-    output_path = Path(output_path)
-    tmp_list = output_path.with_suffix(".txt")
-
-    with open(tmp_list, "w", encoding="utf-8") as f:
-        for p in video_paths:
-            f.write(f"file '{Path(p).absolute()}'\n")
-
+def down_video_fps(src_path: Path, dst_path: Path):
+    """
+    把已經 concat 好的原始大檔壓一個小版，專門給 Gemini 用
+    - 降 FPS
+    - 可選擇降解析度
+    """
+    dst_path = Path(dst_path)
     cmd = [
         "ffmpeg",
-        "-f", "concat",
-        "-safe", "0",
-        "-i", str(tmp_list),
-        "-c", "copy",
-        str(output_path),
+        "-y",                       # 自動覆寫
+        "-i", str(src_path),        # 輸入影片
+        "-vf", "fps=0.5",# 每秒1幀
+        "-an",                      # 移除音訊
+        "-c:v", "libx264",          # 使用 x264 編碼
+        "-preset", "veryfast",      # 加快編碼速度（稍降壓縮效率）
+        str(dst_path),
     ]
     subprocess.run(cmd, check=True)
-
-    tmp_list.unlink(missing_ok=True)
 
 
 def get_video_duration_from_path(path: str) -> float:
@@ -539,20 +537,34 @@ def process_series_level(
     series_video_path = CACHE_DIR / f"series_{safe_series}.mp4"
     if not series_video_path.exists():
         print("  🔗 開始合併整季影片...")
-        concatenate_videos(episode_video_paths, series_video_path)
 
-    # 上傳整季影片到 Gemini API 進行分析
-    print("  🤖 使用 Gemini 分析整季內容...")
-    
+        tmp_list = series_video_path.with_suffix(".txt")
+        with open(tmp_list, "w", encoding="utf-8") as f:
+            for p in episode_video_paths:
+                f.write(f"file '{Path(p).absolute()}'\n")
+        cmd = [
+            "ffmpeg",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", str(tmp_list),
+            "-c", "copy",
+            str(series_video_path),
+        ]
+        subprocess.run(cmd, check=True)
+        tmp_list.unlink(missing_ok=True)
+
+    low_fps_series_video_path = CACHE_DIR / f"series_{safe_series}_low_fps.mp4"
+    if not low_fps_series_video_path.exists():
+        down_video_fps(series_video_path, low_fps_series_video_path)
+
     # 使用 retry 包装上传和查询生成
     def process_series():
         client = get_client()
-        file_uri = upload_video_to_gemini(client, str(series_video_path))
+        file_uri = upload_video_to_gemini(client, str(low_fps_series_video_path))
         return generate_series_queries(client=client, file_uri=file_uri)
     
     series_result = call_with_retry(process_series)
 
-    safe_series = series_name.replace(" ", "_").replace("/", "_")
     print("  📤 上傳整季影片到 HuggingFace...")
     upload_video_to_hf(
         HF_REPO_SERIES, series_video_path, f"videos/series_{safe_series}.mp4"
