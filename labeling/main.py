@@ -329,7 +329,6 @@ def call_with_retry(fn, *args, **kwargs):
                 continue
 
             print(f"❌ [error] {type(e).__name__}: {e}")
-            raise
 
     raise RuntimeError(f"重試次數已達上限 ({MAX_RETRIES})，仍未成功。")
 
