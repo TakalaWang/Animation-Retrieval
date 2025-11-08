@@ -18,6 +18,13 @@ import google.genai as genai
 from google.genai import types
 
 
+# ================== 自定義異常 ==================
+
+class BlockedContentError(Exception):
+    """當內容被 Gemini API 阻止時拋出"""
+    pass
+
+
 # ================== Schema 定義 ==================
 
 SEGMENT_SCHEMA: Dict[str, Any] = {
@@ -148,7 +155,7 @@ def generate_segment_queries(
             parts=[
                 types.Part(
                     file_data=types.FileData(file_uri=file_uri),
-                    video_metadata=types.VideoMetadata(fps=5)
+                    video_metadata=types.VideoMetadata(fps=2)  # 降低 fps 從 5 到 2
                 ),
                 types.Part(text=PROMPT),
             ]
@@ -158,5 +165,66 @@ def generate_segment_queries(
             "response_schema": SEGMENT_SCHEMA,
         }
     )
-    return json.loads(resp.text)
+    
+    # 嘗試多種方式獲取響應內容
+    if resp.text:
+        return json.loads(resp.text)
+    elif hasattr(resp, 'candidates') and resp.candidates:
+        candidate = resp.candidates[0]
+        if hasattr(candidate, 'content') and candidate.content:
+            if hasattr(candidate.content, 'parts') and candidate.content.parts:
+                text = candidate.content.parts[0].text
+                if text:
+                    return json.loads(text)
+    
+    # 檢查是否有 prompt_feedback (安全過濾或其他原因)
+    error_info = []
+    is_blocked = False
+    
+    if hasattr(resp, 'prompt_feedback'):
+        feedback = resp.prompt_feedback
+        if hasattr(feedback, 'block_reason') and feedback.block_reason:
+            is_blocked = True
+            error_info.append(f"block_reason: {feedback.block_reason}")
+        error_info.append(f"prompt_feedback: {resp.prompt_feedback}")
+        
+    if hasattr(resp, 'candidates'):
+        if not resp.candidates:
+            error_info.append("candidates 為空")
+        else:
+            for idx, candidate in enumerate(resp.candidates):
+                if hasattr(candidate, 'finish_reason'):
+                    error_info.append(f"candidate {idx} finish_reason: {candidate.finish_reason}")
+                if hasattr(candidate, 'safety_ratings'):
+                    error_info.append(f"candidate {idx} safety_ratings: {candidate.safety_ratings}")
+    
+    error_msg = "Gemini API 返回空響應"
+    if error_info:
+        error_msg += f" ({', '.join(error_info)})"
+    
+    # 如果是被阻止的內容，拋出特殊異常以便跳過
+    if is_blocked:
+        raise BlockedContentError(error_msg)
+    
+    # 嘗試多種方式獲取響應內容
+    if resp.text:
+        return json.loads(resp.text)
+    elif hasattr(resp, 'candidates') and resp.candidates:
+        # 嘗試從 candidates 中獲取內容
+        candidate = resp.candidates[0]
+        if hasattr(candidate, 'content') and candidate.content:
+            if hasattr(candidate.content, 'parts') and candidate.content.parts:
+                text = candidate.content.parts[0].text
+                if text:
+                    return json.loads(text)
+    
+    # 如果都沒有，打印調試信息並拋出錯誤
+    print(f"⚠️  調試信息:")
+    print(f"   - resp.text: {resp.text}")
+    print(f"   - has candidates: {hasattr(resp, 'candidates')}")
+    if hasattr(resp, 'candidates'):
+        print(f"   - candidates length: {len(resp.candidates) if resp.candidates else 0}")
+    print(f"   - resp attributes: {dir(resp)}")
+    
+    raise ValueError("Gemini API 返回空響應")
 

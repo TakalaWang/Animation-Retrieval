@@ -14,7 +14,7 @@ import google.genai as genai
 from moviepy import VideoFileClip, concatenate_videoclips
 
 
-from segment_processor import generate_segment_queries
+from segment_processor import generate_segment_queries, BlockedContentError
 from episode_processor import generate_episode_queries
 from series_processor import generate_series_queries
 
@@ -108,23 +108,31 @@ def create_metadata_jsonl(
     metadata_filename: str = "metadata.jsonl",
 ):
     """創建 metadata.jsonl 文件並上傳到 HF dataset，啟用 data viewer"""
-    # 確保所有記錄都有 file_name 字段
+    # 處理每筆記錄，確保格式正確
     processed_metadata = []
     for item in metadata_list:
+        # 創建新的記錄，包含所有字段
+        record = {}
+        
+        # 確保有 file_name
         if "file_name" not in item:
-            # 如果沒有 file_name，嘗試從其他字段推斷
             if "episode_name" in item:
                 item["file_name"] = (
                     f"videos/{item.get('series_name', 'unknown')}/episode_{item['episode_name']}.mp4"
                 )
-            elif "segment_index" in item:
+            elif "segment_index" in item and "episode_id" in item:
                 item["file_name"] = (
-                    f"videos/segment_{item.get('episode_id', 'unknown')}_seg{item['segment_index']}.mp4"
+                    f"videos/segment_{item['episode_id']}_seg{item['segment_index']}.mp4"
                 )
             else:
-                continue  # 跳過沒有文件名的記錄
+                print(f"⚠️  警告: 跳過沒有 file_name 的記錄: {item.keys()}")
+                continue
 
-        processed_metadata.append(item)
+        # 複製所有字段到新記錄
+        for key, value in item.items():
+            record[key] = value
+
+        processed_metadata.append(record)
 
     # 寫入本地 metadata.jsonl 文件
     metadata_path = CACHE_DIR / metadata_filename
@@ -220,9 +228,12 @@ def upload_video_to_gemini(client: genai.Client, video_path: str) -> str:
     Returns:
         file_uri: Gemini 處理完成的檔案 URI
     """
+    print(f"    📤 上傳影片: {Path(video_path).name}")
+    
+    # 每次都重新上傳，避免文件過期問題
     uploaded = client.files.upload(file=video_path)
     file_uri = uploaded.uri
-
+    
     while uploaded.state.name == "PROCESSING":
         time.sleep(1)
         uploaded = client.files.get(name=uploaded.name)
@@ -230,6 +241,7 @@ def upload_video_to_gemini(client: genai.Client, video_path: str) -> str:
     if uploaded.state.name == "FAILED":
         raise ValueError(f"影片處理失敗: {uploaded.state.name}")
     
+    print(f"    ✅ 完成")
     return file_uri
 
 
@@ -237,8 +249,16 @@ def call_with_retry(fn, *args, **kwargs):
     """執行 API 呼叫，失敗時自動更換 Gemini Key 並重試"""
     for attempt in range(MAX_RETRIES):
         try:
-            return fn(*args, **kwargs)
+            # 如果 fn 是一個無參數的閉包函數，直接調用
+            if callable(fn) and not args and not kwargs:
+                return fn()
+            else:
+                return fn(*args, **kwargs)
 
+        except BlockedContentError:
+            # 內容被阻止，不重試，直接拋出
+            raise
+            
         except Exception as e:
             msg = str(e).lower()
             is_rate_limited = (
@@ -247,17 +267,34 @@ def call_with_retry(fn, *args, **kwargs):
                 "rate" in msg or
                 "exceeded" in msg
             )
+            
+            is_empty_response = (
+                "返回空響應" in str(e) or
+                "nonetype" in msg
+            )
+            
+            is_permission_denied = (
+                "permission_denied" in msg or
+                "403" in msg or
+                "do not have permission" in msg
+            )
 
             if is_rate_limited:
-                print(f"[retry {attempt+1}/{MAX_RETRIES}] Rate limited -> 換下一個 API Key")
+                print(f"⚠️  [retry {attempt+1}/{MAX_RETRIES}] Rate limited -> 換下一個 API Key")
                 time.sleep(RETRY_SLEEP)
-
-                # 重新建立 client
-                new_client = get_client()
-                kwargs["client"] = new_client
+                continue
+            
+            if is_empty_response:
+                print(f"⚠️  [retry {attempt+1}/{MAX_RETRIES}] 空響應 -> 重試")
+                time.sleep(RETRY_SLEEP)
+                continue
+            
+            if is_permission_denied:
+                print(f"⚠️  [retry {attempt+1}/{MAX_RETRIES}] 文件權限錯誤 (可能過期) -> 重新上傳並重試")
+                time.sleep(RETRY_SLEEP)
                 continue
 
-            print(f"[error] {type(e).__name__}: {e}")
+            print(f"❌ [error] {type(e).__name__}: {e}")
             raise
 
     raise RuntimeError(f"重試次數已達上限 ({MAX_RETRIES})，仍未成功。")
@@ -334,20 +371,32 @@ def process_segments_for_episode(
                 cached = json.load(f)
             cached["series_name"] = series_name
             cached["release_date"] = release_date
+            if "file_name" not in cached:
+                cached["file_name"] = f"videos/segment_{episode_id}_seg{seg_idx}.mp4"
             seg_results.append(cached)
             # 回寫一次，讓檔案也變成新的
             with open(cache_path, "w", encoding="utf-8") as f:
                 json.dump(cached, f, ensure_ascii=False, indent=2)
             continue
 
-        client = get_client()
-        file_uri = call_with_retry(upload_video_to_gemini, client=client, video_path=str(segment_path))
+        # 使用 retry 包装上传和查询生成
+        def process_segment():
+            client = get_client()
+            file_uri = upload_video_to_gemini(client, str(segment_path))
+            return generate_segment_queries(client=client, file_uri=file_uri)
         
-        data = call_with_retry(
-            generate_segment_queries,
-            client=client,
-            file_uri=file_uri,
-        )
+        try:
+            data = call_with_retry(process_segment)
+        except BlockedContentError as e:
+            print(f"⚠️  片段 {seg_idx} 被阻止，跳過: {e}")
+            # 創建一個空的查詢記錄
+            data = {
+                "visual_saliency": ["內容被阻止"] * 3,
+                "character_emotion": ["內容被阻止"] * 3,
+                "action_behavior": ["內容被阻止"] * 3,
+                "dialogue": ["內容被阻止"] * 3,
+                "symbolic_scene": ["內容被阻止"] * 3,
+            }
 
         record = {
             "series_name": series_name,
@@ -363,6 +412,7 @@ def process_segments_for_episode(
 
         seg_results.append(record)
 
+        # 上傳影片到 HF
         upload_video_to_hf(
             HF_REPO_SEGMENT,
             segment_path,
@@ -380,14 +430,14 @@ def process_episode_level(
     release_date: Any,
 ) -> Dict[str, Any]:
     """處理集數級別的查詢生成"""
-    client = get_client()
-    file_uri = call_with_retry(upload_video_to_gemini, client=client, video_path=str(video_path))
-
-    epi_result = call_with_retry(
-        generate_episode_queries,
-        client=client,
-        file_uri=file_uri,
-    )
+    
+    # 使用 retry 包装上传和查询生成
+    def process_episode():
+        client = get_client()
+        file_uri = upload_video_to_gemini(client, str(video_path))
+        return generate_episode_queries(client=client, file_uri=file_uri)
+    
+    epi_result = call_with_retry(process_episode)
 
     # 上傳完整集數影片到 HF
     episode_video_hf_path = f"videos/{series_name}/episode_{episode_id}.mp4"
@@ -476,14 +526,14 @@ def process_series_level(
 
     # 上傳整季影片到 Gemini API 進行分析
     print("  🤖 使用 Gemini 分析整季內容...")
-    client = get_client()
-    file_uri = call_with_retry(upload_video_to_gemini, client=client, video_path=str(series_video_path))
     
-    series_result = call_with_retry(
-        generate_series_queries,
-        client=client,
-        file_uri=file_uri,
-    )
+    # 使用 retry 包装上传和查询生成
+    def process_series():
+        client = get_client()
+        file_uri = upload_video_to_gemini(client, str(series_video_path))
+        return generate_series_queries(client=client, file_uri=file_uri)
+    
+    series_result = call_with_retry(process_series)
 
     print("  📤 上傳整季影片到 HuggingFace...")
     upload_video_to_hf(

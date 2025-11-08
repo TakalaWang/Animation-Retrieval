@@ -144,7 +144,6 @@ def generate_series_queries(
                     file_data=types.FileData(file_uri=file_uri),
                     video_metadata=types.VideoMetadata(fps=1)
                 ),
-                types.Part(file_data=types.FileData(file_uri=file_uri)),
                 types.Part(text=PROMPT),
             ]
         ),
@@ -153,5 +152,17 @@ def generate_series_queries(
             "response_schema": SERIES_SCHEMA,
         }
     )
-    return json.loads(resp.text)
+    
+    # 嘗試多種方式獲取響應內容
+    if resp.text:
+        return json.loads(resp.text)
+    elif hasattr(resp, 'candidates') and resp.candidates:
+        candidate = resp.candidates[0]
+        if hasattr(candidate, 'content') and candidate.content:
+            if hasattr(candidate.content, 'parts') and candidate.content.parts:
+                text = candidate.content.parts[0].text
+                if text:
+                    return json.loads(text)
+    
+    raise ValueError("Gemini API 返回空響應")
 
