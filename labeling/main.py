@@ -19,6 +19,7 @@ from moviepy import VideoFileClip, concatenate_videoclips
 from segment_processor import generate_segment_queries, BlockedContentError
 from episode_processor import generate_episode_queries
 from series_processor import generate_series_queries
+from update_metadata import update_segment_metadata, update_episode_metadata, update_series_metadata
 
 
 # ================== 基本設定 ==================
@@ -78,17 +79,6 @@ def ensure_hf_repos():
     create_repo(HF_REPO_SEGMENT, token=HF_TOKEN, repo_type="dataset", exist_ok=True)
     create_repo(HF_REPO_EPISODE, token=HF_TOKEN, repo_type="dataset", exist_ok=True)
     create_repo(HF_REPO_SERIES, token=HF_TOKEN, repo_type="dataset", exist_ok=True)
-
-
-def upload_json_to_hf(repo_id: str, path: Path, repo_path: str):
-    """上傳 JSON 檔案到 Hugging Face"""
-    api = HfApi(token=HF_TOKEN)
-    api.upload_file(
-        path_or_fileobj=str(path),
-        repo_id=repo_id,
-        path_in_repo=repo_path,
-        repo_type="dataset",
-    )
 
 
 def upload_dataset_to_hf(repo_id: str, data: List[Dict[str, Any]]):
@@ -494,7 +484,7 @@ def process_episode_level(
     epi_local = CACHE_DIR / f"episode_{safe_series}_{episode_id}.json"
     with open(epi_local, "w", encoding="utf-8") as f:
         json.dump(episode_record, f, ensure_ascii=False, indent=2)
-    upload_json_to_hf(HF_REPO_EPISODE, epi_local, f"episode_{safe_series}_{episode_id}.json")
+    update_episode_metadata(HF_TOKEN)
 
     return episode_record
 
@@ -526,7 +516,7 @@ def process_single_episode(
     seg_local = CACHE_DIR / f"segment_{safe_series}_{episode_id}.json"
     with open(seg_local, "w", encoding="utf-8") as f:
         json.dump(seg_results, f, ensure_ascii=False, indent=2)
-    upload_json_to_hf(HF_REPO_SEGMENT, seg_local, f"segment_{safe_series}_{episode_id}.json")
+    update_segment_metadata(HF_TOKEN)
 
     # ===== Episode level =====
     episode_record = process_episode_level(
@@ -593,7 +583,7 @@ def process_series_level(
     series_local = CACHE_DIR / f"series_{safe_series}.json"
     with open(series_local, "w", encoding="utf-8") as f:
         json.dump(series_record, f, ensure_ascii=False, indent=2)
-    upload_json_to_hf(HF_REPO_SERIES, series_local, f"series_{safe_series}.json")
+    update_series_metadata(HF_TOKEN)
 
     return series_record
 
