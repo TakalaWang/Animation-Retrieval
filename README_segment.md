@@ -1,6 +1,8 @@
 ---
 dataset_info:
   features:
+  - name: file_name
+    dtype: string
   - name: series_name
     dtype: string
   - name: episode_id
@@ -9,9 +11,7 @@ dataset_info:
     dtype: int64
   - name: release_date
     dtype: string
-  - name: file_name
-    dtype: string
-  - name: queries
+  - name: query
     struct:
     - name: visual_saliency
       sequence: string
@@ -24,10 +24,10 @@ dataset_info:
     - name: symbolic_scene
       sequence: string
 configs:
-- config_name: default
+- config_name: winter
   data_files:
-  - split: train
-    path: "videos/**/*.mp4"
+    - videos/**/*.mp4
+    - metadata.jsonl
 ---
 
 # Anime 2024 Winter - Segment Queries
@@ -36,12 +36,12 @@ configs:
 
 ## 數據集結構
 
+- **file_name**: 影片文件路徑（用於定位影片片段位置）
 - **series_name**: 動畫系列名稱
 - **episode_id**: 集數 ID
 - **segment_index**: 片段索引
 - **release_date**: 發布日期
-- **file_name**: 影片文件路徑
-- **queries**: 查詢語句集合
+- **query**: 查詢語句集合
   - visual_saliency: 視覺顯著物
   - character_emotion: 角色情緒
   - action_behavior: 動作行為

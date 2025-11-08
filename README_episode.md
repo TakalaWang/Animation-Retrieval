@@ -5,13 +5,11 @@ dataset_info:
     dtype: string
   - name: series_name
     dtype: string
-  - name: episode_name
+  - name: episode_id
     dtype: string
   - name: release_date
     dtype: string
-  - name: duration
-    dtype: float64
-  - name: model_response
+  - name: query
     struct:
     - name: main_plot
       sequence: string
@@ -24,10 +22,10 @@ dataset_info:
     - name: notable_scene
       sequence: string
 configs:
-- config_name: default
+- config_name: winter
   data_files:
-  - split: train
-    path: "videos/**/*.mp4"
+    - videos/**/*.mp4
+    - metadata.jsonl
 ---
 
 # Anime 2024 Winter - Episode Queries
@@ -36,12 +34,11 @@ configs:
 
 ## 數據集結構
 
-- **file_name**: 影片文件路徑
+- **file_name**: 影片文件路徑（用於定位集數影片位置）
 - **series_name**: 動畫系列名稱
-- **episode_name**: 集數名稱
+- **episode_id**: 集數 ID
 - **release_date**: 發布日期
-- **duration**: 影片長度（秒）
-- **model_response**: 模型生成的查詢語句
+- **query**: 模型生成的查詢語句
   - main_plot: 主要劇情
   - turning_point: 轉折點
   - relationship_change: 關係變化

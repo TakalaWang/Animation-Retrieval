@@ -2,6 +2,8 @@ import os
 import json
 import time
 import logging
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -228,21 +230,53 @@ def upload_video_to_gemini(client: genai.Client, video_path: str) -> str:
     Returns:
         file_uri: Gemini 處理完成的檔案 URI
     """
-    print(f"    📤 上傳影片: {Path(video_path).name}")
+    original_path = Path(video_path)
+    print(f"    📤 上傳影片: {original_path.name}")
     
-    # 每次都重新上傳，避免文件過期問題
-    uploaded = client.files.upload(file=video_path)
-    file_uri = uploaded.uri
+    # 檢查檔名是否包含非 ASCII 字符（如中文）
+    filename = original_path.name
+    temp_file = None
+    upload_path = video_path
     
-    while uploaded.state.name == "PROCESSING":
-        time.sleep(1)
-        uploaded = client.files.get(name=uploaded.name)
+    try:
+        # 嘗試用 ASCII 編碼檔名，如果失敗則表示有非 ASCII 字符
+        filename.encode('ascii')
+    except UnicodeEncodeError:
+        # 檔名包含中文或其他非 ASCII 字符，需要創建臨時副本
+        print(f"    ⚠️  檔名包含非 ASCII 字符，創建臨時副本...")
+        
+        # 使用檔案的後綴名和一個安全的 ASCII 名稱
+        safe_name = f"temp_upload_{int(time.time() * 1000)}{original_path.suffix}"
+        temp_file = Path(tempfile.gettempdir()) / safe_name
+        
+        # 複製檔案到臨時位置
+        shutil.copy2(video_path, temp_file)
+        upload_path = str(temp_file)
+        print(f"    ✅ 已創建臨時檔案: {safe_name}")
+    
+    try:
+        # 每次都重新上傳，避免文件過期問題
+        uploaded = client.files.upload(file=upload_path)
+        file_uri = uploaded.uri
+        
+        while uploaded.state.name == "PROCESSING":
+            time.sleep(1)
+            uploaded = client.files.get(name=uploaded.name)
 
-    if uploaded.state.name == "FAILED":
-        raise ValueError(f"影片處理失敗: {uploaded.state.name}")
+        if uploaded.state.name == "FAILED":
+            raise ValueError(f"影片處理失敗: {uploaded.state.name}")
+        
+        print(f"    ✅ 完成")
+        return file_uri
     
-    print(f"    ✅ 完成")
-    return file_uri
+    finally:
+        # 清理臨時檔案
+        if temp_file and temp_file.exists():
+            try:
+                temp_file.unlink()
+                print(f"    🗑️  已刪除臨時檔案")
+            except Exception as e:
+                print(f"    ⚠️  無法刪除臨時檔案: {e}")
 
 
 def call_with_retry(fn, *args, **kwargs):
@@ -309,13 +343,13 @@ def load_and_group_dataset() -> Dict[str, List[Dict[str, Any]]]:
     series_groups: Dict[str, List[Dict[str, Any]]] = {}
     for row in tqdm(ds, desc="group by series"):
         series_name = row["series_name"]
-        episode_name = row["episode_name"]
+        episode_id = row["episode_name"]
         video_path = row["video"]["path"]
         release_date = row.get("release_date")
 
         series_groups.setdefault(series_name, []).append(
             {
-                "episode_name": episode_name,
+                "episode_id": episode_id,
                 "series_name": series_name,
                 "video_path": video_path,
                 "release_date": release_date,
@@ -348,7 +382,9 @@ def process_segments_for_episode(
     for seg_idx, (s, e) in enumerate(
         tqdm(segment_ranges, desc=f"切割片段 {episode_id}", unit="seg")
     ):
-        segment_video_path = CACHE_DIR / f"segment_{episode_id}_seg{seg_idx}.mp4"
+        # 使用 series_name 避免檔名衝突
+        safe_series = series_name.replace(" ", "_").replace("/", "_")
+        segment_video_path = CACHE_DIR / f"segment_{safe_series}_{episode_id}_seg{seg_idx}.mp4"
         if not segment_video_path.exists():
             extract_video_segment(video_path, s, e, segment_video_path)
 
@@ -364,7 +400,8 @@ def process_segments_for_episode(
         seg_idx = seg_info["index"]
         segment_path = seg_info["path"]
 
-        cache_path = CACHE_DIR / f"segment_{episode_id}_seg{seg_idx}.json"
+        safe_series = series_name.replace(" ", "_").replace("/", "_")
+        cache_path = CACHE_DIR / f"segment_{safe_series}_{episode_id}_seg{seg_idx}.json"
         if cache_path.exists():
             # 就算有 cache，也幫它補上 series_name / release_date，避免舊檔是空的
             with open(cache_path, "r", encoding="utf-8") as f:
@@ -403,8 +440,8 @@ def process_segments_for_episode(
             "episode_id": episode_id,
             "segment_index": seg_idx,
             "release_date": release_date,
-            "file_name": f"videos/segment_{episode_id}_seg{seg_idx}.mp4",
-            "queries": data,
+            "file_name": f"videos/{safe_series}/segment_{safe_series}_{episode_id}_seg{seg_idx}.mp4",
+            "query": data,  # 改名為 query
         }
 
         with open(cache_path, "w", encoding="utf-8") as f:
@@ -440,7 +477,8 @@ def process_episode_level(
     epi_result = call_with_retry(process_episode)
 
     # 上傳完整集數影片到 HF
-    episode_video_hf_path = f"videos/{series_name}/episode_{episode_id}.mp4"
+    safe_series = series_name.replace(" ", "_").replace("/", "_")
+    episode_video_hf_path = f"videos/{safe_series}/episode_{safe_series}_{episode_id}.mp4"
     print("  📤 上傳完整集數到 HuggingFace...")
     upload_video_to_hf(HF_REPO_EPISODE, Path(video_path), episode_video_hf_path)
 
@@ -448,17 +486,16 @@ def process_episode_level(
     episode_record = {
         "file_name": episode_video_hf_path,  # 添加 file_name 字段用於 data viewer
         "series_name": series_name,
-        "episode_name": episode_id,
+        "episode_id": episode_id,  # 改名為 episode_id
         "release_date": release_date,
-        "duration": duration_s,
-        "model_response": epi_result,
+        "query": epi_result,  # 改名為 query
     }
 
     # 仍然保存單個 JSON 文件（向後兼容）
-    epi_local = CACHE_DIR / f"episode_{episode_id}.json"
+    epi_local = CACHE_DIR / f"episode_{safe_series}_{episode_id}.json"
     with open(epi_local, "w", encoding="utf-8") as f:
         json.dump(episode_record, f, ensure_ascii=False, indent=2)
-    upload_json_to_hf(HF_REPO_EPISODE, epi_local, f"episode_{episode_id}.json")
+    upload_json_to_hf(HF_REPO_EPISODE, epi_local, f"episode_{safe_series}_{episode_id}.json")
 
     return episode_record
 
@@ -466,7 +503,7 @@ def process_episode_level(
 def process_single_episode(
     series_name: str, episode_info: Dict[str, Any]
 ) -> Tuple[str, str, float, Any, Dict[str, Any], List[Dict[str, Any]]]:
-    episode_id = episode_info["episode_name"]
+    episode_id = episode_info["episode_id"]
     video_path = episode_info["video_path"]
     release_date = episode_info.get("release_date")
 
@@ -486,10 +523,11 @@ def process_single_episode(
         release_date,
     )
 
-    seg_local = CACHE_DIR / f"segment_{episode_id}.json"
+    safe_series = series_name.replace(" ", "_").replace("/", "_")
+    seg_local = CACHE_DIR / f"segment_{safe_series}_{episode_id}.json"
     with open(seg_local, "w", encoding="utf-8") as f:
         json.dump(seg_results, f, ensure_ascii=False, indent=2)
-    upload_json_to_hf(HF_REPO_SEGMENT, seg_local, f"segment_{episode_id}.json")
+    upload_json_to_hf(HF_REPO_SEGMENT, seg_local, f"segment_{safe_series}_{episode_id}.json")
 
     # ===== Episode level =====
     episode_record = process_episode_level(
@@ -519,7 +557,8 @@ def process_series_level(
     # 合併並上傳整季影片
     print("  準備整季影片...")
     episode_video_paths = [vp for _, vp, _, _ in processed_episodes]
-    series_video_path = CACHE_DIR / f"series_{series_name}.mp4"
+    safe_series = series_name.replace(" ", "_").replace("/", "_")
+    series_video_path = CACHE_DIR / f"series_{safe_series}.mp4"
     if not series_video_path.exists():
         print("  🔗 開始合併整季影片...")
         concatenate_videos(episode_video_paths, series_video_path)
@@ -535,27 +574,27 @@ def process_series_level(
     
     series_result = call_with_retry(process_series)
 
+    safe_series = series_name.replace(" ", "_").replace("/", "_")
     print("  📤 上傳整季影片到 HuggingFace...")
     upload_video_to_hf(
-        HF_REPO_SERIES, series_video_path, f"videos/series_{series_name}.mp4"
+        HF_REPO_SERIES, series_video_path, f"videos/series_{safe_series}.mp4"
     )
 
-    # 建立 series metadata（不要存 episode_name，僅存 release_dates 與模型回應）
+    # 建立 series metadata（僅保留必要欄位）
     release_dates = sorted(
         {rd for (_eid, _vp, _dur, rd) in processed_episodes if rd is not None}
     )
     series_record = {
-        "file_name": f"videos/series_{series_name}.mp4",  # 添加 file_name 字段用於 data viewer
+        "file_name": f"videos/series_{safe_series}.mp4",  # 添加 file_name 字段用於 data viewer
         "series_name": series_name,
-        "episode_count": len(processed_episodes),
-        "release_dates": release_dates,
-        "model_response": series_result,
+        "release_date": release_dates[0] if release_dates else None,  # 使用首播日期
+        "query": series_result,  # 改名為 query
     }
 
-    series_local = CACHE_DIR / f"series_{series_name}.json"
+    series_local = CACHE_DIR / f"series_{safe_series}.json"
     with open(series_local, "w", encoding="utf-8") as f:
         json.dump(series_record, f, ensure_ascii=False, indent=2)
-    upload_json_to_hf(HF_REPO_SERIES, series_local, f"series_{series_name}.json")
+    upload_json_to_hf(HF_REPO_SERIES, series_local, f"series_{safe_series}.json")
 
     return series_record
 

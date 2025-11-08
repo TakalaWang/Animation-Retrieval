@@ -155,7 +155,7 @@ def generate_segment_queries(
             parts=[
                 types.Part(
                     file_data=types.FileData(file_uri=file_uri),
-                    video_metadata=types.VideoMetadata(fps=2)  # 降低 fps 從 5 到 2
+                    video_metadata=types.VideoMetadata(fps=2)
                 ),
                 types.Part(text=PROMPT),
             ]

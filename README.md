@@ -43,7 +43,7 @@ Each `metadata.jsonl` file contains JSON Lines format with the following structu
 {
   "file_name": "videos/series_name/episode_01.mp4",
   "series_name": "series_name",
-  "episode_name": "01",
+  "episode_id": "01",
   "release_date": "2024-01-01",
   "duration": 1200.5,
   "model_response": {
