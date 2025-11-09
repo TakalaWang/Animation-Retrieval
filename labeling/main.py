@@ -1,7 +1,8 @@
-# simplified_main_autoupdate.py
-import os, json, time, logging, shutil, tempfile, subprocess
+# simplified_main_autoupdate.py (multithread 版)
+import os, json, time, logging, shutil, tempfile, subprocess, threading
 from pathlib import Path
 from typing import Any, Dict, List
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from tqdm import tqdm
 from dotenv import load_dotenv
@@ -30,13 +31,18 @@ if not GEMINI_API_KEYS:
 if not HF_TOKEN:
     raise RuntimeError("請先設定 HF_TOKEN")
 
-current_key_index = 0
+_api_key_lock = threading.Lock()
+_current_key_index = 0
+
 def get_next_api_key():
-    global current_key_index
-    key = GEMINI_API_KEYS[current_key_index]
-    current_key_index = (current_key_index + 1) % len(GEMINI_API_KEYS)
+    global _current_key_index
+    with _api_key_lock:
+        key = GEMINI_API_KEYS[_current_key_index]
+        _current_key_index = (_current_key_index + 1) % len(GEMINI_API_KEYS)
     return key
-def get_client(): return genai.Client(api_key=get_next_api_key())
+
+def get_client():
+    return genai.Client(api_key=get_next_api_key())
 
 # Hugging Face repositories
 HF_REPO_SEGMENT = "TakalaWang/anime-2024-winter-segment-queries"
@@ -49,12 +55,23 @@ ERROR_LOG = Path("./error_log.jsonl")
 TEST_DATASET = "JacobLinCool/anime-2024"
 TEST_SPLIT = "winter"
 SEGMENT_LENGTH, SEGMENT_OVERLAP = 60, 5
-MAX_RETRIES, RETRY_SLEEP = 5, 5
+
+# retry 相關
+MAX_RETRIES = 10
+BASE_RETRY_SLEEP = 10  # sec
+QUOTA_BACKOFF_MULTIPLIER = 10
+
+# 執行緒數量，可依照你機器調
+MAX_WORKERS = 4
 
 # ================== 共用工具 ==================
 def call_with_retry(fn, *a, **kw):
-    print(f"Processing {kw.get('context', '未知任務')}")
-    context = kw.pop("context", None)
+    """
+    quota/429: 每次重試睡更久
+    其他錯誤: 用固定的 BASE_RETRY_SLEEP
+    """
+    context = kw.pop("context", "未知任務")
+    print(f"Processing {context}")
     last_exc = None
 
     for attempt in range(1, MAX_RETRIES + 1):
@@ -62,14 +79,19 @@ def call_with_retry(fn, *a, **kw):
             return fn(*a, **kw)
         except Exception as e:
             last_exc = e
-
-            if "429" in str(e):
-                print(f"⚠️ quota 類錯誤，第 {attempt} 次，等一下再試：{e}")
+            msg = str(e)
+            # 粗略偵測 quota / 429 / RESOURCE_EXHAUSTED
+            is_quota = ("429" in msg) or ("quota" in msg.lower()) or ("RESOURCE_EXHAUSTED" in msg)
+            if is_quota:
+                sleep_sec = BASE_RETRY_SLEEP * (QUOTA_BACKOFF_MULTIPLIER ** (attempt - 1))
+                print(f"⚠️ quota 類錯誤，第 {attempt} 次，{sleep_sec}s 後再試：{e}")
             else:
+                sleep_sec = BASE_RETRY_SLEEP
                 print(f"❌ 非 quota 錯誤，第 {attempt} 次：{e}")
 
-            time.sleep(RETRY_SLEEP)
+            time.sleep(sleep_sec)
 
+    # 全部失敗才寫 log
     ERROR_LOG.parent.mkdir(parents=True, exist_ok=True)
     with open(ERROR_LOG, "a", encoding="utf-8") as f:
         json.dump(
@@ -89,7 +111,7 @@ def call_with_retry(fn, *a, **kw):
 def down_video_fps(src: Path, dst: Path):
     subprocess.run([
         "ffmpeg","-y","-i",str(src),
-        "-vf","fps=0.2","-an","-c:v","libx264","-preset","veryfast",str(dst)
+        "-vf","fps=0.2","-an","-c:v","libx264","-crf","28","-preset","veryfast",str(dst)
     ], check=True)
 
 def upload_video_to_gemini(client: genai.Client, video_path: str) -> str:
@@ -102,9 +124,13 @@ def upload_video_to_gemini(client: genai.Client, video_path: str) -> str:
         shutil.copy2(video_path, tmp)
         upload_path = str(tmp)
     uploaded = call_with_retry(lambda: client.files.upload(file=upload_path), context=f"upload {video_path}")
+    if uploaded is None:
+        raise RuntimeError("檔案上傳到 Gemini 失敗")
     while uploaded.state.name == "PROCESSING":
-        time.sleep(5); uploaded = client.files.get(name=uploaded.name)
-    if uploaded.state.name == "FAILED": raise RuntimeError("影片處理失敗")
+        time.sleep(5)
+        uploaded = client.files.get(name=uploaded.name)
+    if uploaded.state.name == "FAILED":
+        raise RuntimeError("影片處理失敗")
     return uploaded.uri, uploaded.name
 
 def upload_video_to_hf(repo: str, file: Path, repo_path: str):
@@ -119,7 +145,7 @@ def upload_video_to_hf(repo: str, file: Path, repo_path: str):
 # ================== 處理流程 ==================
 def load_and_group_dataset() -> Dict[str, List[Dict[str, Any]]]:
     ds = load_dataset(TEST_DATASET, TEST_SPLIT, split="train").cast_column("video", Video(decode=False))
-    groups = {}
+    groups: Dict[str, List[Dict[str, Any]]] = {}
     for r in ds:
         groups.setdefault(r["series_name"], []).append({
             "episode_id": r["episode_name"],
@@ -129,23 +155,21 @@ def load_and_group_dataset() -> Dict[str, List[Dict[str, Any]]]:
         })
     return groups
 
-
 def process_segments(series: str, episode: str, path: str, dur: float, date: Any):
-    """產生 segment-level metadata，若有新資料則更新 HF"""
     updated = False
     results = []
     start = 0
     while start < dur - 5:
         end = min(start + SEGMENT_LENGTH, dur)
         safe = series.replace(" ", "_").replace("/", "_")
-        seg_path = CACHE_DIR / f"segment_{safe}_{episode}_seg{len(results)}.mp4"
+        seg_idx = len(results)
+        seg_path = CACHE_DIR / f"segment_{safe}_{episode}_seg{seg_idx}.mp4"
         cache_path = seg_path.with_suffix(".json")
 
         if not seg_path.exists():
             with VideoFileClip(path) as v:
                 v.subclipped(start, end).write_videofile(str(seg_path), codec="libx264", audio_codec="aac", logger=None)
 
-        # 如果已有 cache，跳過
         if cache_path.exists():
             with open(cache_path, "r", encoding="utf-8") as f:
                 record = json.load(f)
@@ -156,22 +180,27 @@ def process_segments(series: str, episode: str, path: str, dur: float, date: Any
         def gen():
             c = get_client()
             file_uri, file_name = upload_video_to_gemini(c, str(seg_path))
-            try: 
+            try:
                 query = generate_segment_queries(client=c, file_uri=file_uri)
             finally:
-                c.files.delete(name=file_name)
+                # 刪掉 Gemini 的檔案
+                try:
+                    c.files.delete(name=file_name)
+                except Exception:
+                    pass
             return query
+
         try:
-            data = call_with_retry(gen, context=f"segment {series} {episode} seg{len(results)}")
+            data = call_with_retry(gen, context=f"segment {series} {episode} seg{seg_idx}")
         except BlockedContentError:
             data = {k: ["內容被阻止"]*3 for k in ["visual_saliency","character_emotion","action_behavior","dialogue","symbolic_scene"]}
 
         record = {
             "series_name": series,
             "episode_id": episode,
-            "segment_index": len(results),
+            "segment_index": seg_idx,
             "release_date": date,
-            "file_name": f"videos/{safe}/segment_{safe}_{episode}_seg{len(results)}.mp4",
+            "file_name": f"videos/{safe}/segment_{safe}_{episode}_seg{seg_idx}.mp4",
             "query": data,
         }
         results.append(record)
@@ -182,12 +211,11 @@ def process_segments(series: str, episode: str, path: str, dur: float, date: Any
         start += SEGMENT_LENGTH - SEGMENT_OVERLAP
 
     if updated:
+        # 多執行緒下這個可能會被叫很多次，不過是你原本的行為，就保留
         update_segment_metadata(HF_TOKEN)
     return results
 
-
 def process_episode(series: str, episode: str, path: str, date: Any):
-    """產生 episode-level metadata，若有更新即更新 HF"""
     safe = series.replace(" ", "_").replace("/", "_")
     cache_path = CACHE_DIR / f"episode_{safe}_{episode}.json"
     if cache_path.exists():
@@ -197,26 +225,33 @@ def process_episode(series: str, episode: str, path: str, date: Any):
     def gen():
         c = get_client()
         file_uri, file_name = upload_video_to_gemini(c, str(path))
-        try: 
-            generate_episode_queries(client=c, file_uri=file_uri)
+        try:
+            return generate_episode_queries(client=c, file_uri=file_uri)
         finally:
-            c.files.delete(name=file_name)
-        return generate_episode_queries(client=c, file_uri=file_uri)
+            try:
+                c.files.delete(name=file_name)
+            except Exception:
+                pass
+
     query = call_with_retry(gen, context=f"episode {series} {episode}")
 
     hf_path = f"videos/{safe}/episode_{safe}_{episode}.mp4"
     upload_video_to_hf(HF_REPO_EPISODE, Path(path), hf_path)
 
-    record = {"file_name": hf_path, "series_name": series, "episode_id": episode, "release_date": date, "query": query}
+    record = {
+        "file_name": hf_path,
+        "series_name": series,
+        "episode_id": episode,
+        "release_date": date,
+        "query": query,
+    }
     with open(cache_path, "w", encoding="utf-8") as f:
         json.dump(record, f, ensure_ascii=False, indent=2)
 
     update_episode_metadata(HF_TOKEN)
     return record
 
-
 def process_series(series: str, episodes: List[Dict[str, Any]]):
-    """產生 series-level metadata，若有更新即更新 HF"""
     safe = series.replace(" ", "_").replace("/", "_")
     cache_path = CACHE_DIR / f"series_{safe}.json"
     if cache_path.exists():
@@ -226,11 +261,17 @@ def process_series(series: str, episodes: List[Dict[str, Any]]):
     series_video = CACHE_DIR / f"series_{safe}.mp4"
     if not series_video.exists():
         with open(series_video.with_suffix(".txt"), "w") as f:
-            for e in episodes: f.write(f"file '{Path(e['video_path']).absolute()}'\n")
-        subprocess.run(["ffmpeg","-f","concat","-safe","0","-i",str(series_video.with_suffix('.txt')),"-c","copy",str(series_video)], check=True)
+            for e in episodes:
+                f.write(f"file '{Path(e['video_path']).absolute()}'\n")
+        subprocess.run([
+            "ffmpeg","-f","concat","-safe","0","-i",str(series_video.with_suffix('.txt')),
+            "-c","copy",str(series_video)
+        ], check=True)
+        series_video.with_suffix(".txt").unlink()
 
     low = CACHE_DIR / f"series_{safe}_low_fps.mp4"
-    if not low.exists(): down_video_fps(series_video, low)
+    if not low.exists():
+        down_video_fps(series_video, low)
 
     def gen():
         c = get_client()
@@ -238,18 +279,26 @@ def process_series(series: str, episodes: List[Dict[str, Any]]):
         try:
             return generate_series_queries(client=c, file_uri=file_uri)
         finally:
-            c.files.delete(name=file_name)
+            try:
+                c.files.delete(name=file_name)
+            except Exception:
+                pass
+
     query = call_with_retry(gen, context=f"series {series}")
     upload_video_to_hf(HF_REPO_SERIES, series_video, f"videos/series_{safe}.mp4")
 
     date = sorted({e["release_date"] for e in episodes if e.get("release_date")})
-    record = {"file_name": f"videos/series_{safe}.mp4","series_name": series,"release_date": date[0] if date else None,"query": query}
+    record = {
+        "file_name": f"videos/series_{safe}.mp4",
+        "series_name": series,
+        "release_date": date[0] if date else None,
+        "query": query,
+    }
     with open(cache_path, "w", encoding="utf-8") as f:
         json.dump(record, f, ensure_ascii=False, indent=2)
 
     update_series_metadata(HF_TOKEN)
     return record
-
 
 # ================== 主程式 ==================
 def main():
@@ -258,14 +307,27 @@ def main():
         create_repo(r, token=HF_TOKEN, repo_type="dataset", exist_ok=True)
 
     groups = load_and_group_dataset()
-    groups = dict(list(groups.items())[:5])  # 限制前 5 個系列
+    groups = dict(list(groups.items())[:10])
 
     for sname, eps in groups.items():
         print(f"🎬 系列: {sname}")
-        for ep in eps:
-            with VideoFileClip(ep["video_path"]) as v: dur = v.duration
-            _ = process_segments(sname, ep["episode_id"], ep["video_path"], dur, ep.get("release_date"))
-            _ = process_episode(sname, ep["episode_id"], ep["video_path"], ep.get("release_date"))
+
+        futures = []
+        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            for ep in eps:
+                def job(ep=ep):
+                    with VideoFileClip(ep["video_path"]) as v:
+                        dur = v.duration
+                    _ = process_segments(sname, ep["episode_id"], ep["video_path"], dur, ep.get("release_date"))
+                    _ = process_episode(sname, ep["episode_id"], ep["video_path"], ep.get("release_date"))
+                futures.append(executor.submit(job))
+
+            for f in as_completed(futures):
+                exc = f.exception()
+                if exc:
+                    print(f"⚠️ episode 任務出錯：{exc}")
+
+        # 2. 全部 episode 跑完再做 series
         _ = process_series(sname, eps)
 
     print("✅ 所有系列處理完成，metadata 皆已自動更新。")
