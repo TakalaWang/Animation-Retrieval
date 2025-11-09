@@ -198,33 +198,5 @@ def generate_segment_queries(
                 if hasattr(candidate, 'safety_ratings'):
                     error_info.append(f"candidate {idx} safety_ratings: {candidate.safety_ratings}")
     
-    error_msg = "Gemini API 返回空響應"
-    if error_info:
-        error_msg += f" ({', '.join(error_info)})"
-    
-    # 如果是被阻止的內容，拋出特殊異常以便跳過
-    if is_blocked:
-        raise BlockedContentError(error_msg)
-    
-    # 嘗試多種方式獲取響應內容
-    if resp.text:
-        return json.loads(resp.text)
-    elif hasattr(resp, 'candidates') and resp.candidates:
-        # 嘗試從 candidates 中獲取內容
-        candidate = resp.candidates[0]
-        if hasattr(candidate, 'content') and candidate.content:
-            if hasattr(candidate.content, 'parts') and candidate.content.parts:
-                text = candidate.content.parts[0].text
-                if text:
-                    return json.loads(text)
-    
-    # 如果都沒有，打印調試信息並拋出錯誤
-    print(f"⚠️  調試信息:")
-    print(f"   - resp.text: {resp.text}")
-    print(f"   - has candidates: {hasattr(resp, 'candidates')}")
-    if hasattr(resp, 'candidates'):
-        print(f"   - candidates length: {len(resp.candidates) if resp.candidates else 0}")
-    print(f"   - resp attributes: {dir(resp)}")
-    
     raise ValueError("Gemini API 返回空響應")
 

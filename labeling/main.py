@@ -44,6 +44,7 @@ HF_REPO_EPISODE = "TakalaWang/anime-2024-winter-episode-queries"
 HF_REPO_SERIES  = "TakalaWang/anime-2024-winter-series-queries"
 
 CACHE_DIR = Path("./cache_gemini_video"); CACHE_DIR.mkdir(parents=True, exist_ok=True)
+ERROR_LOG = Path("./error_log.jsonl")
 
 TEST_DATASET = "JacobLinCool/anime-2024"
 TEST_SPLIT = "winter"
@@ -52,13 +53,38 @@ MAX_RETRIES, RETRY_SLEEP = 5, 5
 
 # ================== 共用工具 ==================
 def call_with_retry(fn, *a, **kw):
-    for _ in range(MAX_RETRIES):
+    context = kw.pop("context", None)
+    last_exc = None
+
+    for attempt in range(1, MAX_RETRIES + 1):
         try:
             return fn(*a, **kw)
         except Exception as e:
-            print(f"❌ [error] {type(e).__name__}: {e}")
+            last_exc = e
+
+
+            if "429" in str(e):
+                print(f"⚠️ quota 類錯誤，第 {attempt} 次，等一下再試：{e}")
+            else:
+                print(f"❌ 非 quota 錯誤，第 {attempt} 次：{e}")
+
             time.sleep(RETRY_SLEEP)
-    raise RuntimeError("重試次數已達上限")
+
+    ERROR_LOG.parent.mkdir(parents=True, exist_ok=True)
+    with open(ERROR_LOG, "a", encoding="utf-8") as f:
+        json.dump(
+            {
+                "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "context": context,
+                "error": str(last_exc),
+            },
+            f,
+            ensure_ascii=False,
+        )
+        f.write("\n")
+
+    print(f"🚨 這筆一直失敗，請看 error_log.jsonl：{context}")
+    return None
 
 def down_video_fps(src: Path, dst: Path):
     subprocess.run([
@@ -75,7 +101,7 @@ def upload_video_to_gemini(client: genai.Client, video_path: str) -> str:
         tmp = Path(tempfile.gettempdir()) / f"temp_{int(time.time()*1000)}{path.suffix}"
         shutil.copy2(video_path, tmp)
         upload_path = str(tmp)
-    uploaded = call_with_retry(lambda: client.files.upload(file=upload_path))
+    uploaded = call_with_retry(lambda: client.files.upload(file=upload_path), context=f"upload {video_path}")
     while uploaded.state.name == "PROCESSING":
         time.sleep(5); uploaded = client.files.get(name=uploaded.name)
     if uploaded.state.name == "FAILED": raise RuntimeError("影片處理失敗")
@@ -132,7 +158,7 @@ def process_segments(series: str, episode: str, path: str, dur: float, date: Any
             file_uri = upload_video_to_gemini(c, str(seg_path))
             return generate_segment_queries(client=c, file_uri=file_uri)
         try:
-            data = call_with_retry(gen)
+            data = call_with_retry(gen, context=f"segment {series} {episode} seg{len(results)}")
         except BlockedContentError:
             data = {k: ["內容被阻止"]*3 for k in ["visual_saliency","character_emotion","action_behavior","dialogue","symbolic_scene"]}
 
@@ -168,7 +194,7 @@ def process_episode(series: str, episode: str, path: str, date: Any):
         c = get_client()
         file_uri = upload_video_to_gemini(c, str(path))
         return generate_episode_queries(client=c, file_uri=file_uri)
-    query = call_with_retry(gen)
+    query = call_with_retry(gen, context=f"episode {series} {episode}")
 
     hf_path = f"videos/{safe}/episode_{safe}_{episode}.mp4"
     upload_video_to_hf(HF_REPO_EPISODE, Path(path), hf_path)
@@ -202,7 +228,7 @@ def process_series(series: str, episodes: List[Dict[str, Any]]):
         c = get_client()
         file_uri = upload_video_to_gemini(c, str(low))
         return generate_series_queries(client=c, file_uri=file_uri)
-    query = call_with_retry(gen)
+    query = call_with_retry(gen, context=f"series {series}")
     upload_video_to_hf(HF_REPO_SERIES, series_video, f"videos/series_{safe}.mp4")
 
     date = sorted({e["release_date"] for e in episodes if e.get("release_date")})
