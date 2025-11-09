@@ -46,7 +46,7 @@ SEGMENT_SCHEMA: Dict[str, Any] = {
             "minItems": 3,
             "maxItems": 3,
             "description": (
-                "描述角色『在此片段中』可觀察到的情緒或表情，例如："
+                "描述角色『在此片段中』可觀察到的情緒或表情，"
                 "若影片中沒有明確表情，不要亂猜。"
             ),
         },
