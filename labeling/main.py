@@ -111,7 +111,7 @@ def call_with_retry(fn, *a, **kw):
 def down_video_fps(src: Path, dst: Path):
     subprocess.run([
         "ffmpeg","-y","-i",str(src),
-        "-vf","fps=0.2","-an","-c:v","libx264","-crf","28","-preset","veryfast",str(dst)
+        "-vf","fps=0.2","-an","-c:v","libx264","-crf","32","-preset","veryfast",str(dst)
     ], check=True)
 
 def upload_video_to_gemini(client: genai.Client, video_path: str) -> str:
@@ -326,8 +326,8 @@ def main():
                 exc = f.exception()
                 if exc:
                     print(f"⚠️ episode 任務出錯：{exc}")
-
-        # 2. 全部 episode 跑完再做 series
+        
+        eps = sorted(eps, key=lambda e: int(e["episode_id"]))
         _ = process_series(sname, eps)
 
     print("✅ 所有系列處理完成，metadata 皆已自動更新。")
