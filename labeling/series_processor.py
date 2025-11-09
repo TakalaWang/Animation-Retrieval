@@ -142,7 +142,7 @@ def generate_series_queries(
             parts=[
                 types.Part(
                     file_data=types.FileData(file_uri=file_uri),
-                    video_metadata=types.VideoMetadata(fps=0.5)
+                    video_metadata=types.VideoMetadata(fps=0.2)
                 ),
                 types.Part(text=PROMPT),
             ]

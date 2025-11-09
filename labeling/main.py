@@ -190,7 +190,7 @@ def down_video_fps(src_path: Path, dst_path: Path):
         "ffmpeg",
         "-y",                       # 自動覆寫
         "-i", str(src_path),        # 輸入影片
-        "-vf", "fps=0.5",# 每秒1幀
+        "-vf", "fps=0.2",
         "-an",                      # 移除音訊
         "-c:v", "libx264",          # 使用 x264 編碼
         "-preset", "veryfast",      # 加快編碼速度（稍降壓縮效率）

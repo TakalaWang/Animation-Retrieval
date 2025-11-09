@@ -155,7 +155,7 @@ def generate_segment_queries(
             parts=[
                 types.Part(
                     file_data=types.FileData(file_uri=file_uri),
-                    video_metadata=types.VideoMetadata(fps=2)
+                    video_metadata=types.VideoMetadata(fps=1)
                 ),
                 types.Part(text=PROMPT),
             ]
@@ -180,7 +180,7 @@ def generate_segment_queries(
     # 檢查是否有 prompt_feedback (安全過濾或其他原因)
     error_info = []
     is_blocked = False
-    
+    print(resp)
     if hasattr(resp, 'prompt_feedback'):
         feedback = resp.prompt_feedback
         if hasattr(feedback, 'block_reason') and feedback.block_reason:

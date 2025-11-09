@@ -135,7 +135,7 @@ def generate_episode_queries(
             parts=[
                 types.Part(
                     file_data=types.FileData(file_uri=file_uri),
-                    video_metadata=types.VideoMetadata(fps=2)
+                    video_metadata=types.VideoMetadata(fps=0.5)
                 ),
                 types.Part(text=PROMPT),
             ]
