@@ -159,3 +159,5 @@ Uses the updated google-genai package for Gemini API calls with advanced feature
 - **File processing**: Proper waiting for asynchronous file processing completion
 - **Structured output**: JSON schema validation for consistent query generation
 - **Rate limit management**: Built-in handling of quota exceeded errors
+
+

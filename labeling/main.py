@@ -1,12 +1,10 @@
-# simplified_main_autoupdate.py (multithread 版)
 import os, json, time, logging, shutil, tempfile, subprocess, threading
 from pathlib import Path
 from typing import Any, Dict, List
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from tqdm import tqdm
 from dotenv import load_dotenv
-from datasets import load_dataset, Dataset, Video
+from datasets import load_dataset, Video
 from huggingface_hub import HfApi, create_repo
 import google.genai as genai
 from moviepy import VideoFileClip
@@ -57,7 +55,7 @@ TEST_SPLIT = "winter"
 SEGMENT_LENGTH, SEGMENT_OVERLAP = 60, 5
 
 # retry 相關
-MAX_RETRIES = 10
+MAX_RETRIES = 5
 BASE_RETRY_SLEEP = 10  # sec
 QUOTA_BACKOFF_MULTIPLIER = 10
 
@@ -125,7 +123,7 @@ def upload_video_to_gemini(client: genai.Client, video_path: str) -> str:
         upload_path = str(tmp)
     uploaded = call_with_retry(lambda: client.files.upload(file=upload_path), context=f"upload {video_path}")
     if uploaded is None:
-        raise RuntimeError("檔案上傳到 Gemini 失敗")
+        return None, None
     while uploaded.state.name == "PROCESSING":
         time.sleep(5)
         uploaded = client.files.get(name=uploaded.name)
@@ -183,7 +181,6 @@ def process_segments(series: str, episode: str, path: str, dur: float, date: Any
             try:
                 query = generate_segment_queries(client=c, file_uri=file_uri)
             finally:
-                # 刪掉 Gemini 的檔案
                 try:
                     c.files.delete(name=file_name)
                 except Exception:
@@ -211,7 +208,6 @@ def process_segments(series: str, episode: str, path: str, dur: float, date: Any
         start += SEGMENT_LENGTH - SEGMENT_OVERLAP
 
     if updated:
-        # 多執行緒下這個可能會被叫很多次，不過是你原本的行為，就保留
         update_segment_metadata(HF_TOKEN)
     return results
 
@@ -326,6 +322,7 @@ def main():
                 exc = f.exception()
                 if exc:
                     print(f"⚠️ episode 任務出錯：{exc}")
+            executor.shutdown(wait=True)
         
         eps = sorted(eps, key=lambda e: int(e["episode_id"]))
         _ = process_series(sname, eps)

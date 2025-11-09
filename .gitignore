@@ -1,5 +1,6 @@
 cache_gemini_video
 metadata/.sync_index.json
+error_log.jsonl
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
