@@ -53,6 +53,7 @@ MAX_RETRIES, RETRY_SLEEP = 5, 5
 
 # ================== 共用工具 ==================
 def call_with_retry(fn, *a, **kw):
+    print(f"Processing {kw.get('context', '未知任務')}")
     context = kw.pop("context", None)
     last_exc = None
 
@@ -61,7 +62,6 @@ def call_with_retry(fn, *a, **kw):
             return fn(*a, **kw)
         except Exception as e:
             last_exc = e
-
 
             if "429" in str(e):
                 print(f"⚠️ quota 類錯誤，第 {attempt} 次，等一下再試：{e}")
@@ -105,7 +105,7 @@ def upload_video_to_gemini(client: genai.Client, video_path: str) -> str:
     while uploaded.state.name == "PROCESSING":
         time.sleep(5); uploaded = client.files.get(name=uploaded.name)
     if uploaded.state.name == "FAILED": raise RuntimeError("影片處理失敗")
-    return uploaded.uri
+    return uploaded.uri, uploaded.name
 
 def upload_video_to_hf(repo: str, file: Path, repo_path: str):
     api = HfApi(token=HF_TOKEN)
@@ -155,8 +155,12 @@ def process_segments(series: str, episode: str, path: str, dur: float, date: Any
 
         def gen():
             c = get_client()
-            file_uri = upload_video_to_gemini(c, str(seg_path))
-            return generate_segment_queries(client=c, file_uri=file_uri)
+            file_uri, file_name = upload_video_to_gemini(c, str(seg_path))
+            try: 
+                query = generate_segment_queries(client=c, file_uri=file_uri)
+            finally:
+                c.files.delete(name=file_name)
+            return query
         try:
             data = call_with_retry(gen, context=f"segment {series} {episode} seg{len(results)}")
         except BlockedContentError:
@@ -192,7 +196,11 @@ def process_episode(series: str, episode: str, path: str, date: Any):
 
     def gen():
         c = get_client()
-        file_uri = upload_video_to_gemini(c, str(path))
+        file_uri, file_name = upload_video_to_gemini(c, str(path))
+        try: 
+            generate_episode_queries(client=c, file_uri=file_uri)
+        finally:
+            c.files.delete(name=file_name)
         return generate_episode_queries(client=c, file_uri=file_uri)
     query = call_with_retry(gen, context=f"episode {series} {episode}")
 
@@ -221,13 +229,16 @@ def process_series(series: str, episodes: List[Dict[str, Any]]):
             for e in episodes: f.write(f"file '{Path(e['video_path']).absolute()}'\n")
         subprocess.run(["ffmpeg","-f","concat","-safe","0","-i",str(series_video.with_suffix('.txt')),"-c","copy",str(series_video)], check=True)
 
-    low = CACHE_DIR / f"series_{safe}_lowfps.mp4"
+    low = CACHE_DIR / f"series_{safe}_low_fps.mp4"
     if not low.exists(): down_video_fps(series_video, low)
 
     def gen():
         c = get_client()
-        file_uri = upload_video_to_gemini(c, str(low))
-        return generate_series_queries(client=c, file_uri=file_uri)
+        file_uri, file_name = upload_video_to_gemini(c, str(low))
+        try:
+            return generate_series_queries(client=c, file_uri=file_uri)
+        finally:
+            c.files.delete(name=file_name)
     query = call_with_retry(gen, context=f"series {series}")
     upload_video_to_hf(HF_REPO_SERIES, series_video, f"videos/series_{safe}.mp4")
 
