@@ -39,9 +39,9 @@ def ensure_file_name(record: Dict[str, Any], level: str) -> Dict[str, Any]:
 def sort_items(items: List[Dict[str, Any]], level: str) -> List[Dict[str, Any]]:
     """讓 jsonl 有固定順序"""
     if level == "segment":
-        return sorted(items, key=lambda x: (x.get("series_name", ""), int(x.get("episode_id", "")), int(x.get("segment_index", 0))))
+        return sorted(items, key=lambda x: (x.get("series_name", ""), float(x.get("episode_id", "")), int(x.get("segment_index", 0))))
     elif level == "episode":
-        return sorted(items, key=lambda x: (x.get("series_name", ""), int(x.get("episode_id", ""))))
+        return sorted(items, key=lambda x: (x.get("series_name", ""), float(x.get("episode_id", ""))))
     elif level == "series":
         return sorted(items, key=lambda x: x.get("series_name", ""))
     return items

@@ -1,6 +1,6 @@
 import os, json, time, logging, shutil, tempfile, subprocess, threading
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from dotenv import load_dotenv
@@ -112,7 +112,7 @@ def down_video_fps(src: Path, dst: Path):
         "-vf","fps=0.2","-an","-c:v","libx264","-crf","32","-preset","veryfast",str(dst)
     ], check=True)
 
-def upload_video_to_gemini(client: genai.Client, video_path: str) -> str:
+def upload_video_to_gemini(client: genai.Client, video_path: str) -> Tuple[Optional[str], Optional[str]]:
     path = Path(video_path)
     try:
         path.name.encode("ascii")
@@ -153,9 +153,11 @@ def load_and_group_dataset() -> Dict[str, List[Dict[str, Any]]]:
         })
     return groups
 
-def process_segments(series: str, episode: str, path: str, dur: float, date: Any):
+def process_segments(series: str, episode: str, path: str, date: Any):
     updated = False
     results = []
+    with VideoFileClip(path) as v:
+        dur = v.duration
     start = 0
     while start < dur - 5:
         end = min(start + SEGMENT_LENGTH, dur)
@@ -164,16 +166,16 @@ def process_segments(series: str, episode: str, path: str, dur: float, date: Any
         seg_path = CACHE_DIR / f"segment_{safe}_{episode}_seg{seg_idx}.mp4"
         cache_path = seg_path.with_suffix(".json")
 
-        if not seg_path.exists():
-            with VideoFileClip(path) as v:
-                v.subclipped(start, end).write_videofile(str(seg_path), codec="libx264", audio_codec="aac", logger=None)
-
         if cache_path.exists():
             with open(cache_path, "r", encoding="utf-8") as f:
                 record = json.load(f)
             results.append(record)
             start += SEGMENT_LENGTH - SEGMENT_OVERLAP
             continue
+
+        if not seg_path.exists():
+            with VideoFileClip(path) as v:
+                v.subclipped(start, end).write_videofile(str(seg_path), codec="libx264", audio_codec="aac", logger=None)
 
         def gen():
             c = get_client()
@@ -296,6 +298,23 @@ def process_series(series: str, episodes: List[Dict[str, Any]]):
     update_series_metadata(HF_TOKEN)
     return record
 
+# ================== 新增：一集包起來，用 call_with_retry 跑 ==================
+def run_episode_with_retry(series_name: str, ep: Dict[str, Any]) -> bool:
+    episode_id = ep["episode_id"]
+    video_path = ep["video_path"]
+    release_date = ep.get("release_date")
+
+    def _do_one_episode():
+        _ = process_segments(series_name, episode_id, video_path, release_date)
+        _ = process_episode(series_name, episode_id, video_path, release_date)
+        return True
+
+    result = call_with_retry(
+        _do_one_episode,
+        context=f"episode {series_name} {episode_id}"
+    )
+    return bool(result)
+
 # ================== 主程式 ==================
 def main():
     print(f"🔑 使用 {len(GEMINI_API_KEYS)} 個 Gemini API Keys")
@@ -303,7 +322,6 @@ def main():
         create_repo(r, token=HF_TOKEN, repo_type="dataset", exist_ok=True)
 
     groups = load_and_group_dataset()
-    groups = dict(list(groups.items())[:10])
 
     for sname, eps in groups.items():
         print(f"🎬 系列: {sname}")
@@ -311,20 +329,12 @@ def main():
         futures = []
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             for ep in eps:
-                def job(ep=ep):
-                    with VideoFileClip(ep["video_path"]) as v:
-                        dur = v.duration
-                    _ = process_segments(sname, ep["episode_id"], ep["video_path"], dur, ep.get("release_date"))
-                    _ = process_episode(sname, ep["episode_id"], ep["video_path"], ep.get("release_date"))
-                futures.append(executor.submit(job))
+                futures.append(executor.submit(run_episode_with_retry, sname, ep))
 
             for f in as_completed(futures):
-                exc = f.exception()
-                if exc:
-                    print(f"⚠️ episode 任務出錯：{exc}")
-            executor.shutdown(wait=True)
-        
-        eps = sorted(eps, key=lambda e: int(e["episode_id"]))
+                f.result()
+                    
+        eps = sorted(eps, key=lambda e: float(e["episode_id"]))
         _ = process_series(sname, eps)
 
     print("✅ 所有系列處理完成，metadata 皆已自動更新。")
